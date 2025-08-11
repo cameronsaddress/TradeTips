@@ -1,10 +1,9 @@
 # app.py
 
 import streamlit as st
-import yfinance as yf
-import matplotlib.pyplot as plt
 import pandas as pd
 import datetime
+import numpy as np
 
 # --- Configuration and Styling ---
 st.set_page_config(
@@ -45,23 +44,57 @@ st.markdown("""
 """, unsafe_allow_html=True)
 
 
-# --- Caching Data Fetching ---
-# Caching the data retrieval function to prevent repeated API calls
-# This makes the app faster and avoids rate-limiting issues from Yahoo Finance
-@st.cache_data
-def get_stock_data(ticker, period="1mo"):
+# --- Static Data Function ---
+# This function replaces the yfinance call with hardcoded data
+# It generates a DataFrame that mimics the structure of a yfinance response
+def get_static_stock_data(ticker, period="1y"):
     """
-    Downloads stock data and handles potential errors gracefully.
-    Returns a pandas DataFrame or None on failure.
+    Generates static stock data for demonstration purposes.
+    Returns a pandas DataFrame.
     """
     try:
-        data = yf.download(ticker, period=period)
-        if data.empty:
-            st.warning(f"No data returned for ticker: {ticker}. Check the ticker symbol.")
-            return None
+        end_date = datetime.date.today()
+        if period == "1y":
+            start_date = end_date - datetime.timedelta(days=365)
+        elif period == "1mo":
+            start_date = end_date - datetime.timedelta(days=30)
+        else: # Default to 1 day
+            start_date = end_date - datetime.timedelta(days=1)
+
+        date_range = pd.date_range(start=start_date, end=end_date, freq='D')
+        
+        # Base price for the ticker, making it somewhat realistic
+        if ticker == 'MSFT':
+            base_price = 450
+        elif ticker == 'AAPL':
+            base_price = 220
+        elif ticker == 'NVDA':
+            base_price = 1200
+        elif ticker == 'GOOGL':
+            base_price = 180
+        elif ticker == 'HWM':
+            base_price = 70
+        elif ticker == 'PFE':
+            base_price = 30
+        elif ticker == 'AMC':
+            base_price = 5
+        else:
+            base_price = 100
+        
+        # Generate some synthetic price movements
+        prices = base_price + np.random.randn(len(date_range)).cumsum() * 0.5
+        
+        # Create a DataFrame
+        data = pd.DataFrame({
+            'Close': prices,
+            'High': prices + np.random.rand(len(date_range)) * 1,
+            'Low': prices - np.random.rand(len(date_range)) * 1,
+            'Volume': np.random.randint(1_000_000, 10_000_000, len(date_range))
+        }, index=date_range)
+        
         return data
     except Exception as e:
-        st.error(f"An error occurred while fetching data for {ticker}: {e}")
+        st.error(f"An error occurred while generating static data for {ticker}: {e}")
         return None
 
 # Placeholder data for demonstration
@@ -126,7 +159,7 @@ if st.session_state.tickers_to_fetch:
             st.subheader(f"Analyzing {ticker}")
 
             # Fetch data for the current ticker
-            data = get_stock_data(ticker, period="1y")
+            data = get_static_stock_data(ticker, period="1y")
 
             if data is not None:
                 # Use a container for a cleaner look
@@ -140,9 +173,14 @@ if st.session_state.tickers_to_fetch:
                     col1, col2, col3, col4 = st.columns(4)
                     
                     last_price = data['Close'].iloc[-1]
-                    prev_close = data['Close'].iloc[-2]
-                    change = last_price - prev_close
-                    percent_change = (change / prev_close) * 100
+                    # Make sure there is a previous day to calculate the change
+                    if len(data['Close']) > 1:
+                        prev_close = data['Close'].iloc[-2]
+                        change = last_price - prev_close
+                        percent_change = (change / prev_close) * 100
+                    else:
+                        change = 0
+                        percent_change = 0
                     
                     with col1:
                         st.metric(label="Current Price", value=f"${last_price:,.2f}")
@@ -169,51 +207,38 @@ tabs_market = st.tabs(["Large Cap Companies", "Early Opportunities"])
 with tabs_market[0]:
     st.subheader("Potential Large Cap Opportunities")
     large_companies = large_companies_placeholder
-    large_results = [get_stock_data(t, period="1d") for t in large_companies]
     
     st.markdown("Based on recent market trends, these large-cap stocks may be worth watching.")
     
-    # Displaying metrics and charts for large companies
-    if large_results and large_results[0] is not None:
-        first_ticker = large_companies[0]
-        st.write(f"**{first_ticker} Price Trend (1 month)**")
-        data = get_stock_data(first_ticker, period="1mo")
-        if data is not None:
-            st.line_chart(data['Close'])
-        else:
-            st.warning(f"Could not retrieve chart data for {first_ticker}.")
-    
-    cols = st.columns(len(large_companies))
-    for i, ticker in enumerate(large_companies):
-        data = large_results[i]
-        if data is not None:
-            with cols[i]:
-                last_price = data['Close'].iloc[-1]
-                st.metric(label=f"Last Price for {ticker}", value=f"${last_price:,.2f}")
+    if large_companies:
+        cols = st.columns(len(large_companies))
+        for i, ticker in enumerate(large_companies):
+            data = get_static_stock_data(ticker, period="1d")
+            if data is not None and not data.empty:
+                with cols[i]:
+                    last_price = data['Close'].iloc[-1]
+                    st.metric(label=f"Last Price for {ticker}", value=f"${last_price:,.2f}")
+            else:
+                 with cols[i]:
+                    st.warning(f"No data for {ticker}")
 
 with tabs_market[1]:
     st.subheader("Potential Early Opportunities")
     early_opportunities = early_opportunities_placeholder
-    early_results = [get_stock_data(t, period="1d") for t in early_opportunities]
     
     st.markdown("Here are some smaller companies showing recent activity that could present early opportunities.")
     
-    # Displaying metrics and charts for early opportunities
-    if early_results and early_results[0] is not None:
-        first_ticker = early_opportunities[0]
-        st.write(f"**{first_ticker} Price Trend (1 month)**")
-        data = get_stock_data(first_ticker, period="1mo")
-        if data is not None:
-            st.line_chart(data['Close'])
-        else:
-            st.warning(f"Could not retrieve chart data for {first_ticker}.")
-            
-    cols = st.columns(len(early_opportunities))
-    for i, ticker in enumerate(early_opportunities):
-        data = early_results[i]
-        if data is not None:
-            with cols[i]:
-                last_price = data['Close'].iloc[-1]
-                st.metric(label=f"Last Price for {ticker}", value=f"${last_price:,.2f}")
+    if early_opportunities:
+        cols = st.columns(len(early_opportunities))
+        for i, ticker in enumerate(early_opportunities):
+            data = get_static_stock_data(ticker, period="1d")
+            if data is not None and not data.empty:
+                with cols[i]:
+                    last_price = data['Close'].iloc[-1]
+                    st.metric(label=f"Last Price for {ticker}", value=f"${last_price:,.2f}")
+            else:
+                with cols[i]:
+                    st.warning(f"No data for {ticker}")
 
 # End of script
+
