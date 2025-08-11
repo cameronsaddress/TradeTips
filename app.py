@@ -12,7 +12,7 @@ import matplotlib.pyplot as plt
 # Set page config for professional look
 st.set_page_config(page_title="Professional IPS Trading Dashboard", layout="wide", page_icon="📈")
 
-# Custom CSS for high-dollar trading site aesthetic (dark theme, modern fonts)
+# Custom CSS for high-dollar trading site aesthetic (dark theme, modern fonts) with responsive stacking
 st.markdown("""
     <style>
     /* General styling */
@@ -78,14 +78,21 @@ st.markdown("""
         border: 1px solid #00ff99;
         border-radius: 5px;
     }
+    /* Responsive stacking for columns */
+    @media (max-width: 768px) {
+        .stColumn {
+            flex-direction: column !important;
+            width: 100% !important;
+        }
+        .stColumn > div {
+            width: 100% !important;
+        }
+    }
     </style>
 """, unsafe_allow_html=True)
 
 # Auto-refresh every 10 minutes (600000 ms)
 st_autorefresh(interval=600000, limit=None, key="data_refresh")
-
-# Get API key from secrets
-api_key = st.secrets["alpha_vantage"]["api_key"]
 
 # Cache non-real-time data for 1 hour to respect API limits
 @st.cache_data(ttl=3600)
@@ -99,14 +106,14 @@ def get_fundamental_data(ticker, api_key):
         return None, None
 
 # IPS Calculation Function (optimized to minimize Alpha Vantage calls - only if fallback needed)
-def calculate_ips(ticker, gpm_min=60, api_key=api_key):
+def calculate_ips(ticker, gpm_min=60, api_key='YOUR_ALPHA_VANTAGE_KEY'):
     try:
         # Use financetoolkit and yfinance first for most data
         companies = Toolkit([ticker], enforce_source="YahooFinance")
         stock = yf.Ticker(ticker)
        
         # Revenue growth
-        income = companies.get_income_statement(period="quarterly")
+        income = companies.get_income_statement(quarterly=True)
         revenue = income.loc['Revenue']
         revenue_growth = revenue.pct_change(periods=4).iloc[-1] * 100 if len(revenue) >= 5 else 0
        
@@ -231,21 +238,24 @@ with col1:
     df_large = pd.DataFrame(large_results)
     st.markdown(dataframe_to_html_with_tooltips(df_large, tooltips), unsafe_allow_html=True)
     
-    # Add a simple price chart for the first stock
+    # Add a simple price chart for the first stock with try-except for download errors
     if large_results:
         first_ticker = large_companies[0]
-        data = yf.download(first_ticker, period="1mo")['Close']
-        fig, ax = plt.subplots()
-        ax.plot(data, color='#00ff99')
-        ax.set_title(f"{first_ticker} Price Trend", color='#ffffff')
-        ax.set_facecolor('#121212')
-        fig.patch.set_facecolor('#121212')
-        ax.tick_params(colors='#ffffff')
-        ax.spines['bottom'].set_color('#00ff99')
-        ax.spines['top'].set_color('#00ff99')
-        ax.spines['left'].set_color('#00ff99')
-        ax.spines['right'].set_color('#00ff99')
-        st.pyplot(fig)
+        try:
+            data = yf.download(first_ticker, period="1mo")['Close']
+            fig, ax = plt.subplots()
+            ax.plot(data, color='#00ff99')
+            ax.set_title(f"{first_ticker} Price Trend", color='#ffffff')
+            ax.set_facecolor('#121212')
+            fig.patch.set_facecolor('#121212')
+            ax.tick_params(colors='#ffffff')
+            ax.spines['bottom'].set_color('#00ff99')
+            ax.spines['top'].set_color('#00ff99')
+            ax.spines['left'].set_color('#00ff99')
+            ax.spines['right'].set_color('#00ff99')
+            st.pyplot(fig)
+        except Exception as e:
+            st.error(f"Unable to load chart for {first_ticker}: {str(e)}")
 
 with col2:
     st.header("Potential Early Opportunities")
@@ -257,21 +267,24 @@ with col2:
     df_early = pd.DataFrame(early_results)
     st.markdown(dataframe_to_html_with_tooltips(df_early, tooltips), unsafe_allow_html=True)
     
-    # Add a simple price chart for the first early stock
+    # Add a simple price chart for the first early stock with try-except for download errors
     if early_results:
         first_ticker = early_opportunities[0]
-        data = yf.download(first_ticker, period="1mo")['Close']
-        fig, ax = plt.subplots()
-        ax.plot(data, color='#00ff99')
-        ax.set_title(f"{first_ticker} Price Trend", color='#ffffff')
-        ax.set_facecolor('#121212')
-        fig.patch.set_facecolor('#121212')
-        ax.tick_params(colors='#ffffff')
-        ax.spines['bottom'].set_color('#00ff99')
-        ax.spines['top'].set_color('#00ff99')
-        ax.spines['left'].set_color('#00ff99')
-        ax.spines['right'].set_color('#00ff99')
-        st.pyplot(fig)
+        try:
+            data = yf.download(first_ticker, period="1mo")['Close']
+            fig, ax = plt.subplots()
+            ax.plot(data, color='#00ff99')
+            ax.set_title(f"{first_ticker} Price Trend", color='#ffffff')
+            ax.set_facecolor('#121212')
+            fig.patch.set_facecolor('#121212')
+            ax.tick_params(colors='#ffffff')
+            ax.spines['bottom'].set_color('#00ff99')
+            ax.spines['top'].set_color('#00ff99')
+            ax.spines['left'].set_color('#00ff99')
+            ax.spines['right'].set_color('#00ff99')
+            st.pyplot(fig)
+        except Exception as e:
+            st.error(f"Unable to load chart for {first_ticker}: {str(e)}")
 
 # Custom Tickers Expander
 with st.expander("Add Custom Tickers"):
