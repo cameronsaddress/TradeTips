@@ -1,248 +1,287 @@
-# app.py
-
 import streamlit as st
 import pandas as pd
-import numpy as np
-import math
 import requests
-import time
-from datetime import datetime
+import json
+from datetime import datetime, timedelta
 
-# --- Configuration and Styling ---
-st.set_page_config(
-    page_title="TradeTips - Dynamic IPS Analysis",
-    page_icon="📈",
-    layout="wide",
-    initial_sidebar_state="collapsed"
-)
+# API key for Financial Modeling Prep (FMP)
+# It is stored securely in Streamlit's secrets management.
+# To set this up, create a file named `.streamlit/secrets.toml`
+# and add `fmp_api_key = "YOUR_FMP_API_KEY"`
+FMP_API_KEY = st.secrets["fmp_api_key"]
 
-# Custom CSS for a clean, modern look
-st.markdown("""
-<style>
-    .stApp {
-        background-color: #0d1117;
-        color: #c9d1d9;
-    }
-    .st-emotion-cache-1cypcdb {
-        background-color: #0d1117;
-    }
-    .st-emotion-cache-e370x9 {
-        background-color: #161b22;
-        border-radius: 0.5rem;
-    }
-    h1, h2, h3, h4, h5, h6 {
-        color: #58a6ff;
-    }
-    .stTabs [data-baseweb="tab-list"] button [data-testid="stMarkdownContainer"] p {
-        font-size: 1.2rem;
-    }
-    .stMetric {
-        background-color: #161b22;
-        padding: 1.5rem;
-        border-radius: 0.75rem;
-        border: 1px solid #30363d;
-        box-shadow: 0 4px 6px rgba(0, 0, 0, 0.2);
-    }
-    .dataframe {
-        color: #c9d1d9;
-    }
-</style>
-""", unsafe_allow_html=True)
+# FMP API base URL
+FMP_BASE_URL = "https://financialmodelingprep.com/api/v3"
 
-# Define the Alpha Vantage API Key from Streamlit Secrets
-try:
-    ALPHA_VANTAGE_API_KEY = st.secrets['alpha_vantage']['api_key']
-except KeyError:
-    st.error("API key for Alpha Vantage not found. Please add it to your Streamlit secrets.")
-    st.stop()
-
-
-# --- IPS Equation Calculation Function ---
-def calculate_ips(metrics):
+def get_stock_data(symbol):
     """
-    Calculates the IPS score based on the provided formula.
-    
-    Args:
-        metrics (dict): A dictionary containing R40, GPM, ROIC, CCC, EPS_cons, and PE.
-    
-    Returns:
-        float: The calculated IPS score.
+    Fetches required financial data for a given stock from the FMP API.
+    Returns a dictionary of metrics.
     """
+    metrics = {
+        'GPM': None,
+        'ROIC': None,
+        'Revenue_Growth': None,
+        'EPS_Consistency': None,
+        'Forward_PE': None,
+        'CCC': None,
+        'error': None
+    }
+
     try:
-        r40 = metrics.get('R40', 0)
-        gpm = metrics.get('GPM', 0)
-        roic = metrics.get('ROIC', 0)
-        ccc = metrics.get('CCC', 0)
-        eps_cons = metrics.get('EPS_cons', 0)
-        pe = metrics.get('PE', 0)
+        # --- Fetching GPM and ROIC from Financial Ratios endpoint ---
+        ratios_url = f"{FMP_BASE_URL}/ratios/{symbol}?period=quarter&limit=1&apikey={FMP_API_KEY}"
+        ratios_data = requests.get(ratios_url).json()
+        if ratios_data and isinstance(ratios_data, list) and ratios_data[0]:
+            metrics['GPM'] = ratios_data[0].get('grossProfitMargin')
+            metrics['ROIC'] = ratios_data[0].get('roic')
         
-        # IPS formula components
-        comp_r40 = r40 * 0.4
-        comp_gpm = max(0, min(1, (gpm - 60) / 40)) * 0.2
-        comp_roic = max(0, min(1, (roic - 10) / 40)) * 0.2
-        comp_ccc = max(0, min(1, ccc / 100)) * 0.1
-        comp_eps_cons = eps_cons * 0.1
-        comp_pe = max(0, min(1, (pe - 20) / 20)) * 0.1
-        
-        # Final calculation
-        ips = comp_r40 + comp_gpm + comp_roic - comp_ccc + comp_eps_cons - comp_pe
-        return ips
+        # --- Fetching Revenue Growth from Income Statement endpoint ---
+        income_url = f"{FMP_BASE_URL}/income-statement/{symbol}?period=quarter&limit=5&apikey={FMP_API_KEY}"
+        income_data = requests.get(income_url).json()
+        if income_data and len(income_data) >= 4:
+            current_revenue = income_data[0].get('revenue')
+            year_ago_revenue = income_data[3].get('revenue')
+            if year_ago_revenue and year_ago_revenue > 0:
+                metrics['Revenue_Growth'] = (current_revenue - year_ago_revenue) / year_ago_revenue
+
+        # --- Fetching EPS Consistency from Earnings Surprises endpoint ---
+        earnings_url = f"{FMP_BASE_URL}/earnings-surprises/{symbol}?limit=4&apikey={FMP_API_KEY}"
+        earnings_data = requests.get(earnings_url).json()
+        if earnings_data and len(earnings_data) >= 4:
+            # Check if actual EPS is greater than or equal to estimated EPS for the last 4 quarters
+            all_beat = all(
+                surprise.get('actualEarningResult') >= surprise.get('estimatedEarning')
+                for surprise in earnings_data
+            )
+            metrics['EPS_Consistency'] = all_beat
+            
+        # --- Fetching Forward PE from Stock Quote endpoint ---
+        quote_url = f"{FMP_BASE_URL}/quote/{symbol}?apikey={FMP_API_KEY}"
+        quote_data = requests.get(quote_url).json()
+        if quote_data and quote_data[0]:
+            # FMP's quote endpoint provides a PE ratio, which can be forward-looking.
+            metrics['Forward_PE'] = quote_data[0].get('pe')
+            
+        # --- Calculating CCC from Balance Sheet and Income Statement ---
+        # We need data from the balance sheet (inventory, receivables, payables) and income statement (revenue, COGS)
+        balance_sheet_url = f"{FMP_BASE_URL}/balance-sheet-statement/{symbol}?period=quarter&limit=2&apikey={FMP_API_KEY}"
+        balance_sheet_data = requests.get(balance_sheet_url).json()
+
+        income_statement_url = f"{FMP_BASE_URL}/income-statement/{symbol}?period=quarter&limit=2&apikey={FMP_API_KEY}"
+        income_statement_data = requests.get(income_statement_url).json()
+
+        if balance_sheet_data and balance_sheet_data[0] and income_statement_data and income_statement_data[0]:
+            bs_latest = balance_sheet_data[0]
+            inc_latest = income_statement_data[0]
+
+            # Use trailing twelve months (TTM) where possible, or latest quarter annualized.
+            cogs_ttm = inc_latest.get('costOfRevenue') * 4 # Annualizing Qtr COGS for TTM approx
+            revenue_ttm = inc_latest.get('revenue') * 4 # Annualizing Qtr Revenue for TTM approx
+            
+            # Inventory, Receivables, Payables are from the Balance Sheet
+            inventory = bs_latest.get('inventory')
+            receivables = bs_latest.get('receivables')
+            payables = bs_latest.get('accountPayables')
+            
+            # Days Inventory Outstanding (DIO)
+            dio = (inventory / cogs_ttm) * 365 if cogs_ttm else None
+            # Days Sales Outstanding (DSO)
+            dso = (receivables / revenue_ttm) * 365 if revenue_ttm else None
+            # Days Payable Outstanding (DPO)
+            dpo = (payables / cogs_ttm) * 365 if cogs_ttm else None
+            
+            if dio is not None and dso is not None and dpo is not None:
+                metrics['CCC'] = dio + dso - dpo
+
     except Exception as e:
-        st.error(f"Error calculating IPS score: {e}")
-        return None
+        metrics['error'] = f"An error occurred while fetching data for {symbol}: {e}"
 
+    return metrics
 
-@st.cache_data(ttl=600)  # Caches the data for 10 minutes (600 seconds)
-def get_stock_data():
+def get_ips_grade(metrics):
     """
-    Fetches stock data from Alpha Vantage, calculates IPS, and returns a DataFrame.
+    Grades a stock based on the IPS criteria using a simple scoring system.
+    Returns the grade and a dictionary of reasons.
     """
-    stock_list = []
+    score = 0
+    reasons = {}
+
+    # GPM > 40% (high gross profit margin)
+    if metrics['GPM'] is not None and metrics['GPM'] > 0.40:
+        score += 1
+        reasons['GPM'] = "✅ GPM > 40%"
+    else:
+        reasons['GPM'] = f"❌ GPM <= 40%" if metrics['GPM'] is not None else "⚠️ GPM data not found"
+
+    # ROIC > 10% (high return on invested capital)
+    if metrics['ROIC'] is not None and metrics['ROIC'] > 0.10:
+        score += 1
+        reasons['ROIC'] = "✅ ROIC > 10%"
+    else:
+        reasons['ROIC'] = f"❌ ROIC <= 10%" if metrics['ROIC'] is not None else "⚠️ ROIC data not found"
+
+    # Revenue Growth > 10% (strong top-line growth)
+    if metrics['Revenue_Growth'] is not None and metrics['Revenue_Growth'] > 0.10:
+        score += 1
+        reasons['Revenue_Growth'] = "✅ Revenue Growth > 10%"
+    else:
+        reasons['Revenue_Growth'] = f"❌ Revenue Growth <= 10%" if metrics['Revenue_Growth'] is not None else "⚠️ Revenue Growth data not found"
+
+    # EPS Consistency (beat last 4 quarters' estimates)
+    if metrics['EPS_Consistency'] is not None and metrics['EPS_Consistency'] is True:
+        score += 1
+        reasons['EPS_Consistency'] = "✅ Consistent EPS beats"
+    else:
+        reasons['EPS_Consistency'] = "❌ Did not consistently beat EPS estimates" if metrics['EPS_Consistency'] is not None else "⚠️ EPS consistency data not found"
+
+    # Forward PE < 20 (attractive valuation)
+    if metrics['Forward_PE'] is not None and metrics['Forward_PE'] < 20:
+        score += 1
+        reasons['Forward_PE'] = "✅ Forward PE < 20"
+    else:
+        reasons['Forward_PE'] = f"❌ Forward PE >= 20" if metrics['Forward_PE'] is not None else "⚠️ Forward PE data not found"
+
+    # CCC < 30 days (efficient cash conversion cycle)
+    if metrics['CCC'] is not None and metrics['CCC'] < 30:
+        score += 1
+        reasons['CCC'] = "✅ CCC < 30 days"
+    else:
+        reasons['CCC'] = f"❌ CCC >= 30 days" if metrics['CCC'] is not None else "⚠️ CCC data not found"
+
+    # Assign a grade based on the score
+    if score >= 5:
+        grade = "A (Strong Buy)"
+    elif score >= 3:
+        grade = "B (Consider Buy)"
+    elif score >= 1:
+        grade = "C (Hold)"
+    else:
+        grade = "D (Sell)"
     
-    # Define a list of tickers to analyze
-    large_companies = ['MSFT', 'AAPL', 'NVDA', 'GOOGL', 'AMZN']
-    early_opportunities = ['HWM', 'SYM', 'HIMS', 'PFE', 'AMC']
-    all_tickers = large_companies + early_opportunities
+    return grade, reasons, score
+
+
+def main():
+    st.set_page_config(page_title="IPS Stock Screener", layout="wide")
+
+    # Custom CSS for a better look and feel
+    st.markdown("""
+        <style>
+        .main-header {
+            font-size: 3rem;
+            font-weight: bold;
+            color: #4CAF50;
+            text-align: center;
+            margin-bottom: 0.5em;
+        }
+        .subheader {
+            font-size: 1.5rem;
+            color: #555;
+            text-align: center;
+            margin-bottom: 2em;
+        }
+        .st-emotion-cache-18ni7ap {
+            padding: 1rem 1rem 1rem 1rem;
+        }
+        .st-emotion-cache-1avcm0s {
+            background-color: #f0f2f6;
+        }
+        .metric-card {
+            background-color: #f9f9f9;
+            padding: 1em;
+            border-radius: 10px;
+            box-shadow: 0 4px 8px rgba(0,0,0,0.1);
+            margin-bottom: 1em;
+        }
+        .grade-card {
+            text-align: center;
+            font-size: 2em;
+            font-weight: bold;
+            padding: 1em;
+            border-radius: 15px;
+            color: white;
+            margin-top: 1em;
+        }
+        .grade-A { background-color: #4CAF50; }
+        .grade-B { background-color: #FFC107; }
+        .grade-C { background-color: #2196F3; }
+        .grade-D { background-color: #F44336; }
+        .stButton button {
+            background-color: #4CAF50;
+            color: white;
+            border-radius: 10px;
+            padding: 10px 20px;
+            font-weight: bold;
+            border: none;
+        }
+        </style>
+    """, unsafe_allow_html=True)
+
+    # Header and description
+    st.markdown('<div class="main-header">IPS Stock Screener</div>', unsafe_allow_html=True)
+    st.markdown('<div class="subheader">Grade stocks based on the IPS financial framework</div>', unsafe_allow_html=True)
+
+    # Sidebar for IPS explanation
+    st.sidebar.header("What is IPS?")
+    st.sidebar.markdown("""
+    The **Investment Philosophy Score (IPS)** is a framework to evaluate stocks based on a set of fundamental metrics.
     
-    # Placeholders for data if an API call fails
-    default_metrics = {'R40': 0, 'GPM': 0, 'ROIC': 0, 'CCC': 0, 'EPS_cons': 0, 'PE': 0}
+    A stock receives a point for each of the following criteria it meets:
+    
+    1.  **GPM > 40%**: Gross Profit Margin (GPM) is above 40%.
+    2.  **ROIC > 10%**: Return on Invested Capital (ROIC) is above 10%.
+    3.  **Revenue Growth > 10%**: Year-over-year revenue growth is above 10%.
+    4.  **EPS Consistency**: Earnings per share (EPS) have consistently beaten estimates for the last four quarters.
+    5.  **Forward PE < 20**: The stock's forward price-to-earnings (PE) ratio is below 20.
+    6.  **CCC < 30 days**: Cash Conversion Cycle (CCC) is less than 30 days.
+    
+    Based on the total score, a grade is assigned:
+    * **A**: 5-6 points (Strong Buy)
+    * **B**: 3-4 points (Consider Buy)
+    * **C**: 1-2 points (Hold)
+    * **D**: 0 points (Sell)
+    """)
 
-    for ticker in all_tickers:
-        st.info(f"Fetching data for {ticker}...")
-        metrics = default_metrics.copy()
-        
-        # --- API Calls to Alpha Vantage ---
-        
-        # 1. Fetch Company Overview for GPM, PE
-        try:
-            overview_url = f"https://www.alphavantage.co/query?function=OVERVIEW&symbol={ticker}&apikey={ALPHA_VANTAGE_API_KEY}"
-            response = requests.get(overview_url)
-            response.raise_for_status()
-            data = response.json()
-            if data and 'GrossProfitMargin' in data:
-                metrics['GPM'] = float(data.get('GrossProfitMargin', 0)) * 100
-                metrics['PE'] = float(data.get('ForwardPE', 0))
-                metrics['ROIC'] = float(data.get('ROIC', 0)) * 100
-            
-        except (requests.exceptions.RequestException, ValueError, KeyError) as e:
-            st.warning(f"Could not fetch Overview data for {ticker}: {e}")
+    # Main input form
+    with st.form("stock_form"):
+        ticker = st.text_input("Enter a stock ticker (e.g., AAPL)", value="AAPL").upper()
+        submit_button = st.form_submit_button("Analyze Stock")
 
-        # 2. Fetch Earnings for EPS Consistency
-        try:
-            earnings_url = f"https://www.alphavantage.co/query?function=EARNINGS&symbol={ticker}&apikey={ALPHA_VANTAGE_API_KEY}"
-            response = requests.get(earnings_url)
-            response.raise_for_status()
-            data = response.json()
-            
-            if data and 'quarterlyEarnings' in data and len(data['quarterlyEarnings']) >= 4:
-                # Check if EPS beat estimates for the last 4 quarters
-                beats = 0
-                for quarter in data['quarterlyEarnings'][:4]:
-                    if float(quarter.get('reportedEPS', 0)) > float(quarter.get('estimatedEPS', 0)):
-                        beats += 1
-                metrics['EPS_cons'] = 1 if beats == 4 else 0
-        except (requests.exceptions.RequestException, ValueError, KeyError) as e:
-            st.warning(f"Could not fetch Earnings data for {ticker}: {e}")
+    if submit_button:
+        with st.spinner("Fetching and analyzing data..."):
+            stock_metrics = get_stock_data(ticker)
 
-        # 3. Fetch Income Statement for Revenue Growth & Net Profit Margin
-        try:
-            income_url = f"https://www.alphavantage.co/query?function=INCOME_STATEMENT&symbol={ticker}&apikey={ALPHA_VANTAGE_API_KEY}"
-            response = requests.get(income_url)
-            response.raise_for_status()
-            data = response.json()
-            
-            if data and 'quarterlyReports' in data and len(data['quarterlyReports']) >= 2:
-                latest_revenue = float(data['quarterlyReports'][0].get('totalRevenue', 0))
-                prev_year_revenue = float(data['quarterlyReports'][4].get('totalRevenue', 0)) # Compare with same quarter previous year
-                
-                if prev_year_revenue > 0:
-                    revenue_growth = ((latest_revenue - prev_year_revenue) / prev_year_revenue) * 100
-                    metrics['R40'] = revenue_growth
-                
-                net_income = float(data['quarterlyReports'][0].get('netIncome', 0))
-                if latest_revenue > 0:
-                    net_profit_margin = (net_income / latest_revenue) * 100
-                    metrics['R40'] += net_profit_margin
-        except (requests.exceptions.RequestException, ValueError, KeyError) as e:
-            st.warning(f"Could not fetch Income Statement data for {ticker}: {e}")
-        
-        # 4. Cash Conversion Cycle (CCC) is more complex and often not a single API call.
-        #    For now, we'll use a placeholder to avoid hitting multiple API limits.
-        #    In a real app, this would require Balance Sheet data.
-        #    We'll set a reasonable placeholder based on your examples.
-        if ticker in ['HIMS', 'SYM']: # low CCC for digital/early tech
-            metrics['CCC'] = 5
-        elif ticker in ['MSFT', 'NVDA', 'AAPL', 'GOOGL']: # moderate CCC for large tech
-            metrics['CCC'] = 20
-        elif ticker in ['HWM', 'PFE', 'AMC']: # higher CCC for manufacturing/physical goods
-            metrics['CCC'] = 60
+        if stock_metrics.get('error'):
+            st.error(stock_metrics['error'])
         else:
-            metrics['CCC'] = 30 # default
+            grade, reasons, score = get_ips_grade(stock_metrics)
             
-        # Calculate IPS score after gathering all available metrics
-        ips_score = calculate_ips(metrics)
-        if ips_score is not None:
-            stock_list.append({
-                'Ticker': ticker,
-                'IPS Score': ips_score,
-                'R40': metrics['R40'],
-                'GPM (%)': metrics['GPM'],
-                'ROIC (%)': metrics['ROIC'],
-                'CCC (days)': metrics['CCC'],
-                'EPS Cons': metrics['EPS_cons'],
-                'Forward PE': metrics['PE']
+            st.markdown(f"### Results for {ticker}")
+            
+            # Display grade
+            grade_color_class = f"grade-{grade.split()[0]}"
+            st.markdown(f'<div class="grade-card {grade_color_class}">{grade}</div>', unsafe_allow_html=True)
+
+            # Display a detailed table of metrics and reasons
+            st.markdown("### IPS Criteria Breakdown")
+            
+            # Create a DataFrame for display
+            df = pd.DataFrame({
+                'Metric': ['GPM', 'ROIC', 'Revenue Growth', 'EPS Consistency', 'Forward PE', 'CCC'],
+                'Criteria': ['> 40%', '> 10%', '> 10%', 'Beat estimates (last 4 qtrs)', '< 20', '< 30 days'],
+                'Result': [
+                    f"{stock_metrics['GPM']:.2%}" if stock_metrics['GPM'] is not None else "N/A",
+                    f"{stock_metrics['ROIC']:.2%}" if stock_metrics['ROIC'] is not None else "N/A",
+                    f"{stock_metrics['Revenue_Growth']:.2%}" if stock_metrics['Revenue_Growth'] is not None else "N/A",
+                    "Yes" if stock_metrics['EPS_Consistency'] else "No",
+                    f"{stock_metrics['Forward_PE']:.2f}" if stock_metrics['Forward_PE'] is not None else "N/A",
+                    f"{stock_metrics['CCC']:.2f} days" if stock_metrics['CCC'] is not None else "N/A",
+                ],
+                'Meets Criteria': [reasons[k] for k in ['GPM', 'ROIC', 'Revenue_Growth', 'EPS_Consistency', 'Forward_PE', 'CCC']]
             })
-        
-        # Respect the Alpha Vantage API rate limit (5 requests per minute)
-        time.sleep(15) 
-        
-    df = pd.DataFrame(stock_list)
-    return df
 
-# --- Main App Logic ---
+            st.table(df)
 
-st.title("📈 TradeTips - Dynamic IPS Analysis")
-st.markdown(f"Last updated: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
-st.markdown("""
-This application dynamically analyzes a list of stocks using the **Alpha Vantage API** to find the best candidates based on a custom **Investment Profile Score (IPS)** formula. The data is refreshed every **10 minutes** to provide up-to-date insights.
-""")
-
-# Fetch the stock data and calculate IPS scores
-with st.spinner("Fetching data from Alpha Vantage and calculating IPS scores... This may take a moment due to API rate limits."):
-    all_stocks_df = get_stock_data()
-
-# Separate large companies and early opportunities
-large_companies = ['MSFT', 'AAPL', 'NVDA', 'GOOGL', 'AMZN']
-early_opportunities = ['HWM', 'SYM', 'HIMS', 'PFE', 'AMC']
-
-large_companies_df = all_stocks_df[all_stocks_df['Ticker'].isin(large_companies)].sort_values('IPS Score', ascending=False)
-early_opportunities_df = all_stocks_df[all_stocks_df['Ticker'].isin(early_opportunities)].sort_values('IPS Score', ascending=False)
-
-# --- Display Results ---
-
-st.header("Best Large Company Opportunities")
-st.markdown("These are the top 5 large-cap stocks with the highest IPS scores.")
-st.dataframe(large_companies_df.head(5).set_index('Ticker').round(2))
-
-st.header("Best Early Opportunities")
-st.markdown("These are the top 5 emerging stocks with the highest IPS scores.")
-st.dataframe(early_opportunities_df.head(5).set_index('Ticker').round(2))
-
-
-# --- Explanation Section ---
-st.header("Understanding the IPS Score")
-st.markdown("""
-The IPS Score is a proprietary metric calculated using a weighted formula that combines several fundamental indicators:
-- **R40:** A blend of **revenue growth** and **net profit margin**.
-- **GPM:** Gross Profit Margin.
-- **ROIC:** Return on Invested Capital.
-- **CCC:** Cash Conversion Cycle. A lower value is better.
-- **EPS Cons:** EPS Consistency (1 if last 4 quarters beat estimates, else 0).
-- **PE:** Forward PE Ratio.
-""")
-st.markdown("""
-<div style="font-size: 0.8rem; text-align: center; color: gray;">
-    Note: Due to Alpha Vantage API limitations, some metrics (like CCC) are placeholders to avoid excessive API calls.
-    The app respects the 5 requests-per-minute limit, so the initial load may be slow.
-</div>
-""", unsafe_allow_html=True)
+if __name__ == "__main__":
+    main()
