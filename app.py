@@ -1,128 +1,99 @@
 import streamlit as st
 import pandas as pd
 import requests
-import json
-from datetime import datetime, timedelta
 
 # API key for Financial Modeling Prep (FMP)
-# It is stored securely in Streamlit's secrets management.
-# To set this up, create a file named `.streamlit/secrets.toml`
-# and add `fmp_api_key = "YOUR_FMP_API_KEY"`
 try:
-    FMP_API_KEY = st.secrets["fmp_api_key"]
-except KeyError:
-    try:
-        FMP_API_KEY = st.secrets["FMP"]["fmp_api_key"]
-    except KeyError:
-        st.error("API key not found. Please add `fmp_api_key = \"YOUR_KEY_HERE\"` to your Streamlit secrets file.")
-        FMP_API_KEY = None # Set to None to prevent further API calls
+    # Attempt to get the key from the default location
+    FMP_API_KEY = st.secrets.get("fmp_api_key")
+    if not FMP_API_KEY:
+        # If not found, try the nested location from the previous attempt
+        FMP_API_KEY = st.secrets.get("FMP", {}).get("fmp_api_key")
+except Exception as e:
+    st.error(f"Error loading API key: {e}. Please ensure 'fmp_api_key' is set in your Streamlit secrets.")
+    FMP_API_KEY = None
 
 # FMP API base URL
 FMP_BASE_URL = "https://financialmodelingprep.com/api/v3"
 
 @st.cache_data(ttl=3600)  # Cache data for 1 hour to avoid excessive API calls
-def get_stock_data(symbol):
+def get_stock_data(symbol, api_key):
     """
     Fetches required financial data for a given stock from the FMP API.
     Returns a dictionary of metrics and the raw API responses.
     """
-    if not FMP_API_KEY:
+    if not api_key:
         return {}, {}
-        
+    
     metrics = {
-        'GPM': None,
-        'ROIC': None,
-        'Revenue_Growth': None,
-        'EPS_Consistency': None,
-        'Forward_PE': None,
-        'CCC': None,
+        'GPM': None, 'ROIC': None, 'Revenue_Growth': None,
+        'EPS_Consistency': None, 'Forward_PE': None, 'CCC': None,
         'error': None
     }
-    
-    raw_data = {
-        'Ratios': None,
-        'Income_Statement': None,
-        'Earnings_Surprises': None,
-        'Quote': None,
-        'Balance_Sheet': None
-    }
+    raw_data = {}
 
     try:
-        # --- Fetching GPM and ROIC from Financial Ratios endpoint ---
-        ratios_url = f"{FMP_BASE_URL}/ratios/{symbol}?period=quarter&limit=1&apikey={FMP_API_KEY}"
-        ratios_response = requests.get(ratios_url)
-        ratios_data = ratios_response.json()
-        raw_data['Ratios'] = ratios_data
-        if ratios_data and isinstance(ratios_data, list) and ratios_data[0]:
-            metrics['GPM'] = ratios_data[0].get('grossProfitMargin')
-            metrics['ROIC'] = ratios_data[0].get('roic')
-        
-        # --- Fetching Revenue Growth from Income Statement endpoint ---
-        income_url = f"{FMP_BASE_URL}/income-statement/{symbol}?period=quarter&limit=5&apikey={FMP_API_KEY}"
-        income_response = requests.get(income_url)
-        income_data = income_response.json()
-        raw_data['Income_Statement'] = income_data
-        if income_data and len(income_data) >= 4:
-            current_revenue = income_data[0].get('revenue')
-            year_ago_revenue = income_data[3].get('revenue')
-            if year_ago_revenue and year_ago_revenue > 0:
+        # A list of endpoints to fetch
+        endpoints = {
+            'Ratios': f"/ratios/{symbol}?period=quarter&limit=1&apikey={api_key}",
+            'Income_Statement': f"/income-statement/{symbol}?period=quarter&limit=5&apikey={api_key}",
+            'Earnings_Surprises': f"/earnings-surprises/{symbol}?limit=4&apikey={api_key}",
+            'Quote': f"/quote/{symbol}?apikey={api_key}",
+            'Balance_Sheet': f"/balance-sheet-statement/{symbol}?period=quarter&limit=2&apikey={api_key}"
+        }
+
+        for name, path in endpoints.items():
+            url = FMP_BASE_URL + path
+            response = requests.get(url)
+            if response.status_code == 200 and response.json():
+                raw_data[name] = response.json()
+            else:
+                raw_data[name] = "Data not available or API error"
+
+        # Parsing the fetched data
+        # GPM and ROIC
+        if raw_data.get('Ratios') and isinstance(raw_data['Ratios'], list) and raw_data['Ratios'][0]:
+            metrics['GPM'] = raw_data['Ratios'][0].get('grossProfitMargin')
+            metrics['ROIC'] = raw_data['Ratios'][0].get('roic')
+
+        # Revenue Growth
+        if raw_data.get('Income_Statement') and len(raw_data['Income_Statement']) >= 4:
+            current_revenue = raw_data['Income_Statement'][0].get('revenue')
+            year_ago_revenue = raw_data['Income_Statement'][3].get('revenue')
+            if current_revenue and year_ago_revenue and year_ago_revenue > 0:
                 metrics['Revenue_Growth'] = (current_revenue - year_ago_revenue) / year_ago_revenue
 
-        # --- Fetching EPS Consistency from Earnings Surprises endpoint ---
-        earnings_url = f"{FMP_BASE_URL}/earnings-surprises/{symbol}?limit=4&apikey={FMP_API_KEY}"
-        earnings_response = requests.get(earnings_url)
-        earnings_data = earnings_response.json()
-        raw_data['Earnings_Surprises'] = earnings_data
-        if earnings_data and len(earnings_data) >= 4:
-            all_beat = all(
+        # EPS Consistency
+        if raw_data.get('Earnings_Surprises') and len(raw_data['Earnings_Surprises']) >= 4:
+            metrics['EPS_Consistency'] = all(
                 surprise.get('actualEarningResult') >= surprise.get('estimatedEarning')
-                for surprise in earnings_data
+                for surprise in raw_data['Earnings_Surprises']
             )
-            metrics['EPS_Consistency'] = all_beat
-            
-        # --- Fetching Forward PE from Stock Quote endpoint ---
-        quote_url = f"{FMP_BASE_URL}/quote/{symbol}?apikey={FMP_API_KEY}"
-        quote_response = requests.get(quote_url)
-        quote_data = quote_response.json()
-        raw_data['Quote'] = quote_data
-        if quote_data and quote_data[0]:
-            metrics['Forward_PE'] = quote_data[0].get('pe')
-            
-        # --- Calculating CCC from Balance Sheet and Income Statement ---
-        balance_sheet_url = f"{FMP_BASE_URL}/balance-sheet-statement/{symbol}?period=quarter&limit=2&apikey={FMP_API_KEY}"
-        balance_sheet_response = requests.get(balance_sheet_url)
-        balance_sheet_data = balance_sheet_response.json()
-        raw_data['Balance_Sheet'] = balance_sheet_data
 
-        income_statement_url = f"{FMP_BASE_URL}/income-statement/{symbol}?period=quarter&limit=2&apikey={FMP_API_KEY}"
-        income_statement_response = requests.get(income_statement_url)
-        income_statement_data = income_statement_response.json()
+        # Forward PE
+        if raw_data.get('Quote') and raw_data['Quote'][0]:
+            metrics['Forward_PE'] = raw_data['Quote'][0].get('pe')
+        
+        # CCC
+        if (raw_data.get('Balance_Sheet') and raw_data['Balance_Sheet'][0] and
+                raw_data.get('Income_Statement') and raw_data['Income_Statement'][0]):
+            bs_latest = raw_data['Balance_Sheet'][0]
+            inc_latest = raw_data['Income_Statement'][0]
 
-        if balance_sheet_data and balance_sheet_data[0] and income_statement_data and income_statement_data[0]:
-            bs_latest = balance_sheet_data[0]
-            inc_latest = income_statement_data[0]
+            cogs_ttm = inc_latest.get('costOfRevenue', 0) * 4
+            revenue_ttm = inc_latest.get('revenue', 0) * 4
+            inventory = bs_latest.get('inventory', 0)
+            receivables = bs_latest.get('receivables', 0)
+            payables = bs_latest.get('accountPayables', 0)
 
-            # Use latest quarter annualized for TTM approximation
-            cogs_ttm = inc_latest.get('costOfRevenue') * 4 
-            revenue_ttm = inc_latest.get('revenue') * 4
-            
-            # Inventory, Receivables, Payables are from the Balance Sheet
-            inventory = bs_latest.get('inventory')
-            receivables = bs_latest.get('receivables')
-            payables = bs_latest.get('accountPayables')
-            
-            # Days Inventory Outstanding (DIO)
-            dio = (inventory / cogs_ttm) * 365 if cogs_ttm and inventory else None
-            # Days Sales Outstanding (DSO)
-            dso = (receivables / revenue_ttm) * 365 if revenue_ttm and receivables else None
-            # Days Payable Outstanding (DPO)
-            dpo = (payables / cogs_ttm) * 365 if cogs_ttm and payables else None
-            
-            if dio is not None and dso is not None and dpo is not None:
+            if cogs_ttm > 0 and revenue_ttm > 0:
+                dio = (inventory / cogs_ttm) * 365
+                dso = (receivables / revenue_ttm) * 365
+                dpo = (payables / cogs_ttm) * 365
                 metrics['CCC'] = dio + dso - dpo
 
     except Exception as e:
-        metrics['error'] = f"An error occurred while fetching data for {symbol}: {e}"
+        metrics['error'] = f"An error occurred while fetching or parsing data: {e}"
 
     return metrics, raw_data
 
@@ -134,189 +105,110 @@ def get_ips_grade(metrics):
     score = 0
     reasons = {}
 
-    # GPM > 40% (high gross profit margin)
-    if metrics['GPM'] is not None and metrics['GPM'] > 0.40:
-        score += 1
-        reasons['GPM'] = "✅ GPM > 40%"
-    else:
-        reasons['GPM'] = f"❌ GPM <= 40%" if metrics['GPM'] is not None else "⚠️ GPM data not found"
+    criteria = {
+        'GPM': (lambda x: x > 0.40, "Gross Profit Margin (GPM) > 40%"),
+        'ROIC': (lambda x: x > 0.10, "Return on Invested Capital (ROIC) > 10%"),
+        'Revenue_Growth': (lambda x: x > 0.10, "Revenue Growth > 10%"),
+        'EPS_Consistency': (lambda x: x is True, "Consistent EPS beats (last 4 qtrs)"),
+        'Forward_PE': (lambda x: x < 20, "Forward P/E < 20"),
+        'CCC': (lambda x: x < 30, "Cash Conversion Cycle (CCC) < 30 days")
+    }
 
-    # ROIC > 10% (high return on invested capital)
-    if metrics['ROIC'] is not None and metrics['ROIC'] > 0.10:
-        score += 1
-        reasons['ROIC'] = "✅ ROIC > 10%"
-    else:
-        reasons['ROIC'] = f"❌ ROIC <= 10%" if metrics['ROIC'] is not None else "⚠️ ROIC data not found"
+    for metric, (check, description) in criteria.items():
+        value = metrics.get(metric)
+        if value is not None:
+            if check(value):
+                score += 1
+                reasons[metric] = f"✅ {description}"
+            else:
+                reasons[metric] = f"❌ {description}"
+        else:
+            reasons[metric] = f"⚠️ {description} (Data not available)"
 
-    # Revenue Growth > 10% (strong top-line growth)
-    if metrics['Revenue_Growth'] is not None and metrics['Revenue_Growth'] > 0.10:
-        score += 1
-        reasons['Revenue_Growth'] = "✅ Revenue Growth > 10%"
-    else:
-        reasons['Revenue_Growth'] = f"❌ Revenue Growth <= 10%" if metrics['Revenue_Growth'] is not None else "⚠️ Revenue Growth data not found"
-
-    # EPS Consistency (beat last 4 quarters' estimates)
-    if metrics['EPS_Consistency'] is not None and metrics['EPS_Consistency'] is True:
-        score += 1
-        reasons['EPS_Consistency'] = "✅ Consistent EPS beats"
-    else:
-        reasons['EPS_Consistency'] = "❌ Did not consistently beat EPS estimates" if metrics['EPS_Consistency'] is not None else "⚠️ EPS consistency data not found"
-
-    # Forward PE < 20 (attractive valuation)
-    if metrics['Forward_PE'] is not None and metrics['Forward_PE'] < 20:
-        score += 1
-        reasons['Forward_PE'] = "✅ Forward PE < 20"
-    else:
-        reasons['Forward_PE'] = f"❌ Forward PE >= 20" if metrics['Forward_PE'] is not None else "⚠️ Forward PE data not found"
-
-    # CCC < 30 days (efficient cash conversion cycle)
-    if metrics['CCC'] is not None and metrics['CCC'] < 30:
-        score += 1
-        reasons['CCC'] = "✅ CCC < 30 days"
-    else:
-        reasons['CCC'] = f"❌ CCC >= 30 days" if metrics['CCC'] is not None else "⚠️ CCC data not found"
-
-    # Assign a grade based on the score
-    if score >= 5:
-        grade = "A (Strong Buy)"
-    elif score >= 3:
-        grade = "B (Consider Buy)"
-    elif score >= 1:
-        grade = "C (Hold)"
-    else:
-        grade = "D (Sell)"
+    if score >= 5: grade = "A (Strong Buy)"
+    elif score >= 3: grade = "B (Consider Buy)"
+    elif score >= 1: grade = "C (Hold)"
+    else: grade = "D (Sell)"
     
     return grade, reasons, score
 
-
 def main():
-    st.set_page_config(page_title="IPS Stock Screener", layout="wide")
+    try:
+        st.set_page_config(page_title="IPS Stock Screener", layout="wide")
 
-    # Custom CSS for a better look and feel
-    st.markdown("""
-        <style>
-        .main-header {
-            font-size: 3rem;
-            font-weight: bold;
-            color: #4CAF50;
-            text-align: center;
-            margin-bottom: 0.5em;
-        }
-        .subheader {
-            font-size: 1.5rem;
-            color: #555;
-            text-align: center;
-            margin-bottom: 2em;
-        }
-        .st-emotion-cache-18ni7ap {
-            padding: 1rem 1rem 1rem 1rem;
-        }
-        .st-emotion-cache-1avcm0s {
-            background-color: #f0f2f6;
-        }
-        .metric-card {
-            background-color: #f9f9f9;
-            padding: 1em;
-            border-radius: 10px;
-            box-shadow: 0 4px 8px rgba(0,0,0,0.1);
-            margin-bottom: 1em;
-        }
-        .grade-card {
-            text-align: center;
-            font-size: 2em;
-            font-weight: bold;
-            padding: 1em;
-            border-radius: 15px;
-            color: white;
-            margin-top: 1em;
-        }
-        .grade-A { background-color: #4CAF50; }
-        .grade-B { background-color: #FFC107; }
-        .grade-C { background-color: #2196F3; }
-        .grade-D { background-color: #F44336; }
-        .stButton button {
-            background-color: #4CAF50;
-            color: white;
-            border-radius: 10px;
-            padding: 10px 20px;
-            font-weight: bold;
-            border: none;
-        }
-        </style>
-    """, unsafe_allow_html=True)
+        # Custom CSS for a better look and feel
+        st.markdown("""
+            <style>
+            .main-header { font-size: 3rem; font-weight: bold; color: #4CAF50; text-align: center; margin-bottom: 0.5em; }
+            .subheader { font-size: 1.5rem; color: #555; text-align: center; margin-bottom: 2em; }
+            .grade-card { text-align: center; font-size: 2em; font-weight: bold; padding: 1em; border-radius: 15px; color: white; margin-top: 1em; }
+            .grade-A { background-color: #4CAF50; }
+            .grade-B { background-color: #FFC107; }
+            .grade-C { background-color: #2196F3; }
+            .grade-D { background-color: #F44336; }
+            </style>
+        """, unsafe_allow_html=True)
 
-    # Header and description
-    st.markdown('<div class="main-header">IPS Stock Screener</div>', unsafe_allow_html=True)
-    st.markdown('<div class="subheader">Grade stocks based on the IPS financial framework</div>', unsafe_allow_html=True)
+        st.markdown('<div class="main-header">IPS Stock Screener</div>', unsafe_allow_html=True)
+        st.markdown('<div class="subheader">Grade stocks based on the IPS financial framework</div>', unsafe_allow_html=True)
 
-    # Sidebar for IPS explanation
-    st.sidebar.header("What is IPS?")
-    st.sidebar.markdown("""
-    The **Investment Philosophy Score (IPS)** is a framework to evaluate stocks based on a set of fundamental metrics.
-    
-    A stock receives a point for each of the following criteria it meets:
-    
-    1.  **GPM > 40%**: Gross Profit Margin (GPM) is above 40%.
-    2.  **ROIC > 10%**: Return on Invested Capital (ROIC) is above 10%.
-    3.  **Revenue Growth > 10%**: Year-over-year revenue growth is above 10%.
-    4.  **EPS Consistency**: Earnings per share (EPS) have consistently beaten estimates for the last four quarters.
-    5.  **Forward PE < 20**: The stock's forward price-to-earnings (PE) ratio is below 20.
-    6.  **CCC < 30 days**: Cash Conversion Cycle (CCC) is less than 30 days.
-    
-    Based on the total score, a grade is assigned:
-    * **A**: 5-6 points (Strong Buy)
-    * **B**: 3-4 points (Consider Buy)
-    * **C**: 1-2 points (Hold)
-    * **D**: 0 points (Sell)
-    """)
+        if not FMP_API_KEY:
+            st.warning("Please add your Financial Modeling Prep API key to the Streamlit secrets to continue.")
+            return
 
-    # Main input form
-    with st.form("stock_form"):
-        ticker = st.text_input("Enter a stock ticker (e.g., AAPL)", value="AAPL").upper()
-        submit_button = st.form_submit_button("Analyze Stock")
+        st.sidebar.header("What is IPS?")
+        st.sidebar.markdown("""
+        The **Investment Philosophy Score (IPS)** is a framework to evaluate stocks based on a set of fundamental metrics.
+        A stock receives a point for each of the following criteria it meets:
+        1.  **GPM > 40%**
+        2.  **ROIC > 10%**
+        3.  **Revenue Growth > 10%**
+        4.  **EPS Consistency**
+        5.  **Forward PE < 20**
+        6.  **CCC < 30 days**
+        Based on the total score, a grade is assigned:
+        * **A**: 5-6 points (Strong Buy)
+        * **B**: 3-4 points (Consider Buy)
+        * **C**: 1-2 points (Hold)
+        * **D**: 0 points (Sell)
+        """)
 
-    if submit_button and FMP_API_KEY:
-        with st.spinner("Fetching and analyzing data..."):
-            stock_metrics, raw_data = get_stock_data(ticker)
+        with st.form("stock_form"):
+            ticker = st.text_input("Enter a stock ticker (e.g., AAPL)", value="AAPL").upper()
+            submit_button = st.form_submit_button("Analyze Stock")
 
-        if stock_metrics.get('error'):
-            st.error(stock_metrics['error'])
-        else:
-            grade, reasons, score = get_ips_grade(stock_metrics)
+        if submit_button:
+            with st.spinner("Fetching and analyzing data..."):
+                stock_metrics, raw_data = get_stock_data(ticker, FMP_API_KEY)
             
-            st.markdown(f"### Results for {ticker}")
-            
-            # Create two tabs
-            analysis_tab, raw_data_tab = st.tabs(["Analysis", "Raw Data"])
-            
-            with analysis_tab:
-                # Display grade
-                grade_color_class = f"grade-{grade.split()[0]}"
-                st.markdown(f'<div class="grade-card {grade_color_class}">{grade}</div>', unsafe_allow_html=True)
-
-                # Display a detailed table of metrics and reasons
-                st.markdown("### IPS Criteria Breakdown")
+            if stock_metrics.get('error'):
+                st.error(stock_metrics['error'])
+            else:
+                grade, reasons, score = get_ips_grade(stock_metrics)
+                st.markdown(f"### Results for {ticker}")
                 
-                # Create a DataFrame for display
-                df = pd.DataFrame({
-                    'Metric': ['GPM', 'ROIC', 'Revenue Growth', 'EPS Consistency', 'Forward PE', 'CCC'],
-                    'Criteria': ['> 40%', '> 10%', '> 10%', 'Beat estimates (last 4 qtrs)', '< 20', '< 30 days'],
-                    'Result': [
-                        f"{stock_metrics['GPM']:.2%}" if stock_metrics['GPM'] is not None else "N/A",
-                        f"{stock_metrics['ROIC']:.2%}" if stock_metrics['ROIC'] is not None else "N/A",
-                        f"{stock_metrics['Revenue_Growth']:.2%}" if stock_metrics['Revenue_Growth'] is not None else "N/A",
-                        "Yes" if stock_metrics['EPS_Consistency'] else "No",
-                        f"{stock_metrics['Forward_PE']:.2f}" if stock_metrics['Forward_PE'] is not None else "N/A",
-                        f"{stock_metrics['CCC']:.2f} days" if stock_metrics['CCC'] is not None else "N/A",
-                    ],
-                    'Meets Criteria': [reasons[k] for k in ['GPM', 'ROIC', 'Revenue_Growth', 'EPS_Consistency', 'Forward_PE', 'CCC']]
-                })
-
-                st.table(df)
-            
-            with raw_data_tab:
-                st.markdown("### Raw JSON Data from FMP API")
-                for title, data in raw_data.items():
-                    if data:
+                analysis_tab, raw_data_tab = st.tabs(["Analysis", "Raw Data"])
+                
+                with analysis_tab:
+                    grade_color_class = f"grade-{grade.split()[0]}"
+                    st.markdown(f'<div class="grade-card {grade_color_class}">{grade}</div>', unsafe_allow_html=True)
+                    st.markdown("### IPS Criteria Breakdown")
+                    
+                    df = pd.DataFrame({
+                        'Metric': ['GPM', 'ROIC', 'Revenue Growth', 'EPS Consistency', 'Forward PE', 'CCC'],
+                        'Criteria': ['> 40%', '> 10%', '> 10%', 'Beat estimates', '< 20', '< 30 days'],
+                        'Meets Criteria': [reasons[k] for k in ['GPM', 'ROIC', 'Revenue_Growth', 'EPS_Consistency', 'Forward_PE', 'CCC']]
+                    })
+                    st.table(df)
+                
+                with raw_data_tab:
+                    st.markdown("### Raw JSON Data from FMP API")
+                    for title, data in raw_data.items():
                         with st.expander(f"Show {title} Data"):
                             st.json(data)
+    except Exception as e:
+        st.error(f"An unexpected error occurred: {e}")
+
+if __name__ == "__main__":
+    main()
+
