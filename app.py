@@ -1,4 +1,3 @@
-```python
 import streamlit as st
 import yfinance as yf
 from financetoolkit import Toolkit
@@ -299,4 +298,3 @@ with st.expander("Add Custom Tickers"):
 # Footer
 st.markdown("<hr style='border:1px solid #00ff99;' />", unsafe_allow_html=True)
 st.write("Powered by yFinance, FinanceToolkit & Alpha Vantage | Data as of August 11, 2025 | Note: API calls optimized for free tier limits (25/day). Fundamentals update quarterly.")
-```
