@@ -8,7 +8,14 @@ from datetime import datetime, timedelta
 # It is stored securely in Streamlit's secrets management.
 # To set this up, create a file named `.streamlit/secrets.toml`
 # and add `fmp_api_key = "YOUR_FMP_API_KEY"`
-FMP_API_KEY = st.secrets["fmp_api_key"]
+try:
+    FMP_API_KEY = st.secrets["fmp_api_key"]
+except KeyError:
+    try:
+        FMP_API_KEY = st.secrets["FMP"]["fmp_api_key"]
+    except KeyError:
+        st.error("API key not found. Please add `fmp_api_key = \"YOUR_KEY_HERE\"` to your Streamlit secrets file.")
+        FMP_API_KEY = None # Set to None to prevent further API calls
 
 # FMP API base URL
 FMP_BASE_URL = "https://financialmodelingprep.com/api/v3"
@@ -19,6 +26,9 @@ def get_stock_data(symbol):
     Fetches required financial data for a given stock from the FMP API.
     Returns a dictionary of metrics and the raw API responses.
     """
+    if not FMP_API_KEY:
+        return {}, {}
+        
     metrics = {
         'GPM': None,
         'ROIC': None,
@@ -265,7 +275,7 @@ def main():
         ticker = st.text_input("Enter a stock ticker (e.g., AAPL)", value="AAPL").upper()
         submit_button = st.form_submit_button("Analyze Stock")
 
-    if submit_button:
+    if submit_button and FMP_API_KEY:
         with st.spinner("Fetching and analyzing data..."):
             stock_metrics, raw_data = get_stock_data(ticker)
 
@@ -310,5 +320,3 @@ def main():
                     if data:
                         with st.expander(f"Show {title} Data"):
                             st.json(data)
-
-
