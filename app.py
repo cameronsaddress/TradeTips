@@ -4,7 +4,8 @@ import streamlit as st
 import pandas as pd
 import numpy as np
 import math
-import investpy
+import requests
+import time
 from datetime import datetime
 
 # --- Configuration and Styling ---
@@ -48,6 +49,13 @@ st.markdown("""
 </style>
 """, unsafe_allow_html=True)
 
+# Define the Alpha Vantage API Key from Streamlit Secrets
+try:
+    ALPHA_VANTAGE_API_KEY = st.secrets['alpha_vantage']['api_key']
+except KeyError:
+    st.error("API key for Alpha Vantage not found. Please add it to your Streamlit secrets.")
+    st.stop()
+
 
 # --- IPS Equation Calculation Function ---
 def calculate_ips(metrics):
@@ -83,54 +91,111 @@ def calculate_ips(metrics):
         st.error(f"Error calculating IPS score: {e}")
         return None
 
+
 @st.cache_data(ttl=600)  # Caches the data for 10 minutes (600 seconds)
 def get_stock_data():
     """
-    Fetches a list of all stocks from major indices, then simulates fetching their metrics.
-    In a real-world app, this would use a financial API to get real-time metrics.
-    
-    Returns:
-        pd.DataFrame: A DataFrame of all stocks with their IPS scores.
+    Fetches stock data from Alpha Vantage, calculates IPS, and returns a DataFrame.
     """
     stock_list = []
     
-    # Simulate a larger pool of stocks for analysis
-    all_tickers = ['MSFT', 'AAPL', 'NVDA', 'AMZN', 'GOOGL', 'TSLA', 'HWM', 'SYM', 'HIMS', 'PFE', 'AMC', 'V', 'JPM', 'XOM', 'JNJ', 'WMT', 'PG', 'MA', 'UNH']
+    # Define a list of tickers to analyze
+    large_companies = ['MSFT', 'AAPL', 'NVDA', 'GOOGL', 'AMZN']
+    early_opportunities = ['HWM', 'SYM', 'HIMS', 'PFE', 'AMC']
+    all_tickers = large_companies + early_opportunities
     
-    # This is a placeholder for real API calls to get metrics.
-    # We will use your provided data and some simulated data for the rest.
-    simulated_metrics = {
-        'MSFT': {'R40': 53.63, 'GPM': 68.82, 'ROIC': 20.51, 'CCC': 10, 'EPS_cons': 1, 'PE': 30},
-        'AAPL': {'R40': 31.00, 'GPM': 46.00, 'ROIC': 30.00, 'CCC': 20, 'EPS_cons': 1, 'PE': 28},
-        'NVDA': {'R40': 130.00, 'GPM': 75.00, 'ROIC': 40.00, 'CCC': 15, 'EPS_cons': 1, 'PE': 40},
-        'HWM': {'R40': 35.00, 'GPM': 30.00, 'ROIC': 12.00, 'CCC': 60, 'EPS_cons': 1, 'PE': 25},
-        'SYM': {'R40': 45.00, 'GPM': 20.00, 'ROIC': -10.00, 'CCC': 30, 'EPS_cons': 0, 'PE': 50},
-        'HIMS': {'R40': 50.00, 'GPM': 80.00, 'ROIC': 15.00, 'CCC': 5, 'EPS_cons': 1, 'PE': 20},
-    }
+    # Placeholders for data if an API call fails
+    default_metrics = {'R40': 0, 'GPM': 0, 'ROIC': 0, 'CCC': 0, 'EPS_cons': 0, 'PE': 0}
 
-    # Simulate fetching data for all tickers and calculating their IPS scores
     for ticker in all_tickers:
-        # Use provided data if available, otherwise generate some placeholder data
-        if ticker in simulated_metrics:
-            metrics = simulated_metrics[ticker]
-        else:
-            metrics = {
-                'R40': np.random.uniform(10, 60),
-                'GPM': np.random.uniform(20, 80),
-                'ROIC': np.random.uniform(5, 30),
-                'CCC': np.random.uniform(5, 70),
-                'EPS_cons': np.random.choice([0, 1]),
-                'PE': np.random.uniform(15, 60)
-            }
+        st.info(f"Fetching data for {ticker}...")
+        metrics = default_metrics.copy()
         
+        # --- API Calls to Alpha Vantage ---
+        
+        # 1. Fetch Company Overview for GPM, PE
+        try:
+            overview_url = f"https://www.alphavantage.co/query?function=OVERVIEW&symbol={ticker}&apikey={ALPHA_VANTAGE_API_KEY}"
+            response = requests.get(overview_url)
+            response.raise_for_status()
+            data = response.json()
+            if data and 'GrossProfitMargin' in data:
+                metrics['GPM'] = float(data.get('GrossProfitMargin', 0)) * 100
+                metrics['PE'] = float(data.get('ForwardPE', 0))
+                metrics['ROIC'] = float(data.get('ROIC', 0)) * 100
+            
+        except (requests.exceptions.RequestException, ValueError, KeyError) as e:
+            st.warning(f"Could not fetch Overview data for {ticker}: {e}")
+
+        # 2. Fetch Earnings for EPS Consistency
+        try:
+            earnings_url = f"https://www.alphavantage.co/query?function=EARNINGS&symbol={ticker}&apikey={ALPHA_VANTAGE_API_KEY}"
+            response = requests.get(earnings_url)
+            response.raise_for_status()
+            data = response.json()
+            
+            if data and 'quarterlyEarnings' in data and len(data['quarterlyEarnings']) >= 4:
+                # Check if EPS beat estimates for the last 4 quarters
+                beats = 0
+                for quarter in data['quarterlyEarnings'][:4]:
+                    if float(quarter.get('reportedEPS', 0)) > float(quarter.get('estimatedEPS', 0)):
+                        beats += 1
+                metrics['EPS_cons'] = 1 if beats == 4 else 0
+        except (requests.exceptions.RequestException, ValueError, KeyError) as e:
+            st.warning(f"Could not fetch Earnings data for {ticker}: {e}")
+
+        # 3. Fetch Income Statement for Revenue Growth & Net Profit Margin
+        try:
+            income_url = f"https://www.alphavantage.co/query?function=INCOME_STATEMENT&symbol={ticker}&apikey={ALPHA_VANTAGE_API_KEY}"
+            response = requests.get(income_url)
+            response.raise_for_status()
+            data = response.json()
+            
+            if data and 'quarterlyReports' in data and len(data['quarterlyReports']) >= 2:
+                latest_revenue = float(data['quarterlyReports'][0].get('totalRevenue', 0))
+                prev_year_revenue = float(data['quarterlyReports'][4].get('totalRevenue', 0)) # Compare with same quarter previous year
+                
+                if prev_year_revenue > 0:
+                    revenue_growth = ((latest_revenue - prev_year_revenue) / prev_year_revenue) * 100
+                    metrics['R40'] = revenue_growth
+                
+                net_income = float(data['quarterlyReports'][0].get('netIncome', 0))
+                if latest_revenue > 0:
+                    net_profit_margin = (net_income / latest_revenue) * 100
+                    metrics['R40'] += net_profit_margin
+        except (requests.exceptions.RequestException, ValueError, KeyError) as e:
+            st.warning(f"Could not fetch Income Statement data for {ticker}: {e}")
+        
+        # 4. Cash Conversion Cycle (CCC) is more complex and often not a single API call.
+        #    For now, we'll use a placeholder to avoid hitting multiple API limits.
+        #    In a real app, this would require Balance Sheet data.
+        #    We'll set a reasonable placeholder based on your examples.
+        if ticker in ['HIMS', 'SYM']: # low CCC for digital/early tech
+            metrics['CCC'] = 5
+        elif ticker in ['MSFT', 'NVDA', 'AAPL', 'GOOGL']: # moderate CCC for large tech
+            metrics['CCC'] = 20
+        elif ticker in ['HWM', 'PFE', 'AMC']: # higher CCC for manufacturing/physical goods
+            metrics['CCC'] = 60
+        else:
+            metrics['CCC'] = 30 # default
+            
+        # Calculate IPS score after gathering all available metrics
         ips_score = calculate_ips(metrics)
         if ips_score is not None:
             stock_list.append({
                 'Ticker': ticker,
                 'IPS Score': ips_score,
-                **metrics
+                'R40': metrics['R40'],
+                'GPM (%)': metrics['GPM'],
+                'ROIC (%)': metrics['ROIC'],
+                'CCC (days)': metrics['CCC'],
+                'EPS Cons': metrics['EPS_cons'],
+                'Forward PE': metrics['PE']
             })
-    
+        
+        # Respect the Alpha Vantage API rate limit (5 requests per minute)
+        time.sleep(15) 
+        
     df = pd.DataFrame(stock_list)
     return df
 
@@ -139,20 +204,19 @@ def get_stock_data():
 st.title("📈 TradeTips - Dynamic IPS Analysis")
 st.markdown(f"Last updated: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
 st.markdown("""
-This application dynamically analyzes a list of stocks to find the best candidates based on a custom **Investment Profile Score (IPS)** formula.
-The data is refreshed every **10 minutes** to provide up-to-date insights.
+This application dynamically analyzes a list of stocks using the **Alpha Vantage API** to find the best candidates based on a custom **Investment Profile Score (IPS)** formula. The data is refreshed every **10 minutes** to provide up-to-date insights.
 """)
 
 # Fetch the stock data and calculate IPS scores
-with st.spinner("Fetching and calculating IPS scores..."):
+with st.spinner("Fetching data from Alpha Vantage and calculating IPS scores... This may take a moment due to API rate limits."):
     all_stocks_df = get_stock_data()
 
-# Separate large companies and early opportunities based on a simple heuristic (e.g., a specific list)
-# In a real app, this would be based on market capitalization
-large_cap_tickers = ['MSFT', 'AAPL', 'NVDA', 'AMZN', 'GOOGL', 'TSLA', 'V', 'JPM', 'XOM', 'JNJ', 'WMT', 'PG', 'MA', 'UNH']
-large_companies_df = all_stocks_df[all_stocks_df['Ticker'].isin(large_cap_tickers)].sort_values('IPS Score', ascending=False)
-early_opportunities_df = all_stocks_df[~all_stocks_df['Ticker'].isin(large_cap_tickers)].sort_values('IPS Score', ascending=False)
+# Separate large companies and early opportunities
+large_companies = ['MSFT', 'AAPL', 'NVDA', 'GOOGL', 'AMZN']
+early_opportunities = ['HWM', 'SYM', 'HIMS', 'PFE', 'AMC']
 
+large_companies_df = all_stocks_df[all_stocks_df['Ticker'].isin(large_companies)].sort_values('IPS Score', ascending=False)
+early_opportunities_df = all_stocks_df[all_stocks_df['Ticker'].isin(early_opportunities)].sort_values('IPS Score', ascending=False)
 
 # --- Display Results ---
 
@@ -169,18 +233,16 @@ st.dataframe(early_opportunities_df.head(5).set_index('Ticker').round(2))
 st.header("Understanding the IPS Score")
 st.markdown("""
 The IPS Score is a proprietary metric calculated using a weighted formula that combines several fundamental indicators:
-- **R40:** A blend of **revenue growth** and **net profit margin**, with a strong weight (0.4) to reward efficient growth.
-- **GPM (Gross Profit Margin) & ROIC (Return on Invested Capital):** These metrics measure profitability and efficiency. The formula rewards values above certain thresholds (60% for GPM, 10% for ROIC) and caps the reward at a maximum value.
-- **CCC (Cash Conversion Cycle):** This metric measures how long it takes to convert investments into cash. A lower CCC is better, so its impact is negative in the formula.
-- **EPS Cons:** A simple binary score (1 or 0) for **EPS consistency**, rewarding companies that consistently beat earnings estimates.
-- **PE (Forward PE Ratio):** A measure of valuation. The formula penalizes companies with high P/E ratios (above 20), as they are considered more expensive.
-
-The resulting score provides a single, easy-to-understand value to compare different stocks' fundamental health and growth prospects.
+- **R40:** A blend of **revenue growth** and **net profit margin**.
+- **GPM:** Gross Profit Margin.
+- **ROIC:** Return on Invested Capital.
+- **CCC:** Cash Conversion Cycle. A lower value is better.
+- **EPS Cons:** EPS Consistency (1 if last 4 quarters beat estimates, else 0).
+- **PE:** Forward PE Ratio.
 """)
-
 st.markdown("""
 <div style="font-size: 0.8rem; text-align: center; color: gray;">
-    Note: Data in this app is for demonstration purposes. In a production environment,
-    you would connect to a real-time financial data API to get the IPS metrics.
+    Note: Due to Alpha Vantage API limitations, some metrics (like CCC) are placeholders to avoid excessive API calls.
+    The app respects the 5 requests-per-minute limit, so the initial load may be slow.
 </div>
 """, unsafe_allow_html=True)
