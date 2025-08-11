@@ -84,6 +84,9 @@ st.markdown("""
 # Auto-refresh every 10 minutes (600000 ms)
 st_autorefresh(interval=600000, limit=None, key="data_refresh")
 
+# Get API key from secrets
+api_key = st.secrets["alpha_vantage"]["api_key"]
+
 # Cache non-real-time data for 1 hour to respect API limits
 @st.cache_data(ttl=3600)
 def get_fundamental_data(ticker, api_key):
@@ -96,7 +99,7 @@ def get_fundamental_data(ticker, api_key):
         return None, None
 
 # IPS Calculation Function (optimized to minimize Alpha Vantage calls - only if fallback needed)
-def calculate_ips(ticker, gpm_min=60, api_key='YOUR_ALPHA_VANTAGE_KEY'):
+def calculate_ips(ticker, gpm_min=60, api_key=api_key):
     try:
         # Use financetoolkit and yfinance first for most data
         companies = Toolkit([ticker], enforce_source="YahooFinance")
